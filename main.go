@@ -8,14 +8,26 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
 var (
-	port = flag.Int("port", 8080, "listen port")
+	port       = flag.Int("port", 8080, "listen port")
+	config     = flag.String("config", "", "config file")
+	configDark = flag.String("config-dark", "", "config file for dark theme")
 )
 
 func main() {
+	flag.Usage = func() {
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+
+	fmt.Println("port: " + strconv.Itoa(*port))
+	fmt.Println("config: " + *config)
+	fmt.Println("config-dark: " + *configDark)
+
 	go startServer(*port)
 
 	sig := make(chan os.Signal, 1)
@@ -54,11 +66,16 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func pageHandler(w http.ResponseWriter, r *http.Request, images ...string) {
+	iface := r.URL.Query().Get("iface")
+	query := ""
+	if len(iface) > 0 {
+		query = "?iface=" + iface
+	}
 	printPageHeader(w)
-	printNav(w)
+	printNav(w, r)
 	fmt.Fprintf(w, "<div class=\"content\">")
 	for _, image := range images {
-		fmt.Fprintf(w, "<img src=\""+image+".png\" alt=\""+image+".png\">")
+		fmt.Fprintf(w, "<img src=\""+image+".png"+query+"\" alt=\""+image+".png\">")
 	}
 	fmt.Fprintf(w, "<div>")
 	printPageFooter(w)
@@ -102,18 +119,49 @@ func printPageHeader(w http.ResponseWriter) {
 }
 
 func printPageFooter(w http.ResponseWriter) {
+	printScript(w)
 	fmt.Fprintf(w, "</body></html>")
 }
 
-func printNav(w http.ResponseWriter) {
+func printNav(w http.ResponseWriter, r *http.Request) {
+	cmd := exec.Command("vnstat", "--iflist", "1")
+	stdout, err := cmd.Output()
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+
+	iflist := strings.Split(string(stdout), "\n")
+
 	fmt.Fprintf(w, "<ul class=\"nav\">")
-	fmt.Fprint(w, "<li><a href=\"summary\">Summary</a></li>")
-	fmt.Fprint(w, "<li><a href=\"top\">Top</a></li>")
-	fmt.Fprint(w, "<li><a href=\"years\">Years</a></li>")
-	fmt.Fprint(w, "<li><a href=\"months\">Months</a></li>")
-	fmt.Fprint(w, "<li><a href=\"days\">Days</a></li>")
-	fmt.Fprint(w, "<li><a href=\"hours\">Hours</a></li>")
-	fmt.Fprint(w, "<li><a href=\"five\">Five Minutes</a></li>")
+
+	// interface select
+	selectedIface := r.URL.Query().Get("iface")
+	fmt.Fprintf(w, "<select onchange=\"location.replace(location.pathname+'?iface='+encodeURIComponent(this.value))\" style=\"width: 120px\">")
+	fmt.Fprintf(w, "<option value=\"\">default interface</option>")
+	for _, iface := range iflist {
+		if len(iface) > 0 {
+			iface = strings.TrimSpace(iface)
+			if iface == selectedIface {
+				fmt.Fprintf(w, "<option selected>"+iface+"</option>")
+			} else {
+				fmt.Fprintf(w, "<option>"+iface+"</option>")
+			}
+		}
+	}
+	fmt.Fprintf(w, "</select>")
+
+	query := ""
+	if len(selectedIface) > 0 {
+		query = "?iface=" + selectedIface
+	}
+	fmt.Fprint(w, "<li><a href=\"summary"+query+"\">Summary</a></li>")
+	fmt.Fprint(w, "<li><a href=\"top"+query+"\">Top</a></li>")
+	fmt.Fprint(w, "<li><a href=\"years"+query+"\">Years</a></li>")
+	fmt.Fprint(w, "<li><a href=\"months"+query+"\">Months</a></li>")
+	fmt.Fprint(w, "<li><a href=\"days"+query+"\">Days</a></li>")
+	fmt.Fprint(w, "<li><a href=\"hours"+query+"\">Hours</a></li>")
+	fmt.Fprint(w, "<li><a href=\"five"+query+"\">Five Minutes</a></li>")
 	fmt.Fprintf(w, "</ul>")
 }
 
@@ -129,7 +177,7 @@ a {
 }
 
 @media (prefers-color-scheme: dark) {
-  body {
+  body, input, select {
     color: #eee;
     background: #121212;
   }
@@ -156,7 +204,32 @@ a {
 </style>`)
 }
 
+func printScript(w http.ResponseWriter) {
+	fmt.Fprint(w, `<script>
+if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+	document.querySelectorAll("img").forEach(img => {
+		let src = img.src;
+		if (!src.includes("?")) {
+			src += "?";
+		}
+		src += "&dark=1";
+		img.src = src;
+	});
+}
+</script>`)
+}
+
 func imageHandler(w http.ResponseWriter, r *http.Request, args ...string) {
+	iface := r.URL.Query().Get("iface")
+	dark := r.URL.Query().Get("dark")
+	if len(iface) > 0 {
+		args = append(args, "-i", iface)
+	}
+	if dark == "1" && len(*configDark) > 0 {
+		args = append(args, "--config", *configDark)
+	} else if len(*config) > 0 {
+		args = append(args, "--config", *config)
+	}
 	args = append(args, "-o", "-")
 	cmd := exec.Command("vnstati", args...)
 	stdout, err := cmd.Output()
