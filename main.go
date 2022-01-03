@@ -67,15 +67,27 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 
 func pageHandler(w http.ResponseWriter, r *http.Request, images ...string) {
 	iface := r.URL.Query().Get("iface")
-	query := ""
+	query := "?"
 	if len(iface) > 0 {
-		query = "?iface=" + iface
+		query += "iface=" + iface
 	}
+	ifList := getIfList()
+
+	// check iface safe
+	if !checkIface(iface, ifList) {
+		fmt.Fprintf(w, "Interface does not exist: "+iface)
+		return
+	}
+
 	printPageHeader(w)
-	printNav(w, r)
+	printNav(w, r, ifList)
 	fmt.Fprintf(w, "<div class=\"content\">")
 	for _, image := range images {
-		fmt.Fprintf(w, "<img src=\""+image+".png"+query+"\" alt=\""+image+".png\">")
+		fmt.Fprintf(w, "<picture>")
+		fmt.Fprintf(w, "<source srcset=\""+image+".png"+query+"&dark=1\" media=\"(prefers-color-scheme: dark)\">")
+		fmt.Fprintf(w, "<source srcset=\""+image+".png"+query+"&dark=0\">")
+		fmt.Fprintf(w, "<img class=\"light\" src=\""+image+".png"+query+"\" alt=\""+image+".png\">")
+		fmt.Fprintf(w, "</picture>")
 	}
 	fmt.Fprintf(w, "<div>")
 	printPageFooter(w)
@@ -123,23 +135,14 @@ func printPageFooter(w http.ResponseWriter) {
 	fmt.Fprintf(w, "</body></html>")
 }
 
-func printNav(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("vnstat", "--iflist", "1")
-	stdout, err := cmd.Output()
-	if err != nil {
-		fmt.Println(err.Error())
-		return
-	}
-
-	iflist := strings.Split(string(stdout), "\n")
-
+func printNav(w http.ResponseWriter, r *http.Request, ifList []string) {
 	fmt.Fprintf(w, "<ul class=\"nav\">")
 
 	// interface select
 	selectedIface := r.URL.Query().Get("iface")
 	fmt.Fprintf(w, "<select onchange=\"location.replace(location.pathname+'?iface='+encodeURIComponent(this.value))\" style=\"width: 120px\">")
 	fmt.Fprintf(w, "<option value=\"\">default interface</option>")
-	for _, iface := range iflist {
+	for _, iface := range ifList {
 		if len(iface) > 0 {
 			iface = strings.TrimSpace(iface)
 			if iface == selectedIface {
@@ -167,11 +170,12 @@ func printNav(w http.ResponseWriter, r *http.Request) {
 
 func printCss(w http.ResponseWriter) {
 	fmt.Fprint(w, `<style>
-body {
+body, input, select {
   color: #222;
   background: #fff;
   font: 100% system-ui;
 }
+
 a {
   color: #0033cc;
 }
@@ -182,7 +186,7 @@ a {
     background: #121212;
   }
 
-  body a {
+  a {
     color: #809fff;
   }
 }
@@ -198,29 +202,25 @@ a {
 }
 
 .content img {
-	display: block;
 	margin-top: 16px;
+	display: block;
 }
 </style>`)
 }
 
 func printScript(w http.ResponseWriter) {
 	fmt.Fprint(w, `<script>
-if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-	document.querySelectorAll("img").forEach(img => {
-		let src = img.src;
-		if (!src.includes("?")) {
-			src += "?";
-		}
-		src += "&dark=1";
-		img.src = src;
-	});
-}
 </script>`)
 }
 
 func imageHandler(w http.ResponseWriter, r *http.Request, args ...string) {
 	iface := r.URL.Query().Get("iface")
+	// check iface safe
+	if !checkIface(iface, nil) {
+		fmt.Fprintf(w, "Interface does not exist: "+iface)
+		return
+	}
+
 	dark := r.URL.Query().Get("dark")
 	if len(iface) > 0 {
 		args = append(args, "-i", iface)
@@ -283,4 +283,38 @@ func fiveHandler(w http.ResponseWriter, r *http.Request) {
 
 func fivegraphHandler(w http.ResponseWriter, r *http.Request) {
 	imageHandler(w, r, "-5g")
+}
+
+func getIfList() []string {
+	cmd := exec.Command("vnstat", "--iflist", "1")
+	stdout, err := cmd.Output()
+	if err != nil {
+		fmt.Println(err.Error())
+		return nil
+	}
+
+	iflist := strings.Split(string(stdout), "\n")
+
+	var result []string
+	for _, str := range iflist {
+		if len(str) > 0 {
+			result = append(result, str)
+		}
+	}
+	return result
+}
+
+func checkIface(iface string, ifList []string) bool {
+	if len(iface) == 0 {
+		return true
+	}
+	if ifList == nil {
+		ifList = getIfList()
+	}
+	for _, a := range ifList {
+		if a == iface {
+			return true
+		}
+	}
+	return false
 }
