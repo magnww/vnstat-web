@@ -376,12 +376,17 @@ func liveHandler(ws *websocket.Conn) {
 		fmt.Println(err.Error())
 		return
 	}
+	defer stdout.Close()
+
 	err = cmd.Start()
-	defer cmd.Process.Signal(syscall.SIGINT)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
+	defer func() {
+		cmd.Process.Signal(syscall.SIGINT)
+		cmd.Wait()
+	}()
 
 	buf := make([]byte, 1024)
 	ticker := time.NewTicker(1 * time.Second)
