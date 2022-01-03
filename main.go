@@ -10,6 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
+
+	"golang.org/x/net/websocket"
 )
 
 var (
@@ -58,6 +61,8 @@ func startServer(port int) {
 	http.HandleFunc("/days", dayPageHandler)
 	http.HandleFunc("/hours", hourPageHandler)
 	http.HandleFunc("/five", fivePageHandler)
+
+	http.Handle("/live", websocket.Handler(liveHandler))
 	http.ListenAndServe("[::]:"+strconv.Itoa(port), nil)
 }
 
@@ -82,6 +87,7 @@ func pageHandler(w http.ResponseWriter, r *http.Request, images ...string) {
 	printPageHeader(w)
 	printNav(w, r, ifList)
 	fmt.Fprintf(w, "<div class=\"content\">")
+	fmt.Fprintf(w, "<div id=\"live\"></div>")
 	for _, image := range images {
 		fmt.Fprintf(w, "<picture>")
 		fmt.Fprintf(w, "<source srcset=\""+image+".png"+query+"&dark=1\" media=\"(prefers-color-scheme: dark)\">")
@@ -205,11 +211,32 @@ a {
 	margin-top: 16px;
 	display: block;
 }
+
+#live {
+    font-family: Courier, monospace;
+}
 </style>`)
 }
 
 func printScript(w http.ResponseWriter) {
 	fmt.Fprint(w, `<script>
+(function connect() {
+	const socket = new WebSocket("ws://"+location.host+"/live"+location.search);
+	socket.addEventListener("open", function (event) {
+		socket.send("Hello!");
+	});
+	socket.addEventListener("message", function (event) {
+		document.getElementById("live").innerText = event.data;
+	});
+	socket.addEventListener("close", function (event) {
+		console.log('Socket is closed. Reconnect will be attempted in 10 second.', event.reason);
+		document.getElementById("live").innerText = "";
+		delete socket;
+		setTimeout(function() {
+			connect();
+		}, 10000);
+	});
+})();
 </script>`)
 }
 
@@ -317,4 +344,62 @@ func checkIface(iface string, ifList []string) bool {
 		}
 	}
 	return false
+}
+
+func liveHandler(ws *websocket.Conn) {
+	defer ws.Close()
+
+	var err error
+	var reply string
+	if err = websocket.Message.Receive(ws, &reply); err != nil {
+		fmt.Println("receive failed:", err)
+		return
+	}
+	fmt.Println("reveived from client: " + reply)
+
+	iface := ws.Request().URL.Query().Get("iface")
+	if !checkIface(iface, nil) {
+		fmt.Println("Interface does not exist: ", iface)
+		return
+	}
+
+	args := []string{"-l"}
+	if len(iface) > 0 {
+		args = append(args, "-i", iface)
+	}
+	if len(*config) > 0 {
+		args = append(args, "--config", *config)
+	}
+	cmd := exec.Command("vnstat", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+	err = cmd.Start()
+	defer cmd.Process.Signal(syscall.SIGINT)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+
+	buf := make([]byte, 1024)
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		<-ticker.C
+		read, err := stdout.Read(buf)
+		if err != nil {
+			fmt.Println(err.Error())
+			return
+		}
+		str := string(buf[:read])
+		i := strings.Index(str, "rx:")
+		if i != -1 {
+			if err = websocket.Message.Send(ws, str[i:]); err != nil {
+				fmt.Println("send failed:", err)
+				return
+			}
+		}
+	}
 }
