@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,6 +21,16 @@ var (
 	config     = flag.String("config", "", "config file")
 	configDark = flag.String("config-dark", "", "config file for dark theme")
 )
+
+var (
+	lock                           = &sync.Mutex{}
+	mapConn map[string][]LiveEntry = make(map[string][]LiveEntry)
+)
+
+type LiveEntry struct {
+	Conn *websocket.Conn
+	Ch   chan bool
+}
 
 func main() {
 	flag.Usage = func() {
@@ -347,8 +358,6 @@ func checkIface(iface string, ifList []string) bool {
 }
 
 func liveHandler(ws *websocket.Conn) {
-	defer ws.Close()
-
 	var err error
 	var reply string
 	if err = websocket.Message.Receive(ws, &reply); err != nil {
@@ -363,6 +372,34 @@ func liveHandler(ws *websocket.Conn) {
 		return
 	}
 
+	startLive(iface, ws)
+}
+
+func startLive(iface string, ws *websocket.Conn) {
+	entry := LiveEntry{
+		Conn: ws,
+		Ch:   make(chan bool),
+	}
+	if appendOrCreateEntry(iface, entry) {
+		go liveProcess(iface)
+	}
+	<-entry.Ch
+}
+
+func appendOrCreateEntry(iface string, entry LiveEntry) bool {
+	lock.Lock()
+	defer lock.Unlock()
+
+	if list, ok := mapConn[iface]; ok {
+		mapConn[iface] = append(list, entry)
+		return false
+	} else {
+		mapConn[iface] = []LiveEntry{entry}
+		return true
+	}
+}
+
+func liveProcess(iface string) {
 	args := []string{"-l"}
 	if len(iface) > 0 {
 		args = append(args, "-i", iface)
@@ -399,12 +436,38 @@ func liveHandler(ws *websocket.Conn) {
 			return
 		}
 		str := string(buf[:read])
+		// str := "rx:" + strconv.Itoa(time.Now().Nanosecond()) // test
 		i := strings.Index(str, "rx:")
 		if i != -1 {
-			if err = websocket.Message.Send(ws, str[i:]); err != nil {
-				fmt.Println("send failed:", err)
-				return
+			lock.Lock()
+
+			message := str[i:]
+			list := mapConn[iface]
+			removeList := []int{}
+			for i, en := range list {
+				if err = websocket.Message.Send(en.Conn, message); err != nil {
+					en.Ch <- true
+					fmt.Println("send failed:", err)
+					removeList = append(removeList, i)
+				}
 			}
+
+			if len(removeList) > 0 {
+				for j, i := range removeList {
+					list = append(list[:i-j], list[i-j+1:]...)
+				}
+
+				if len(list) == 0 {
+					ticker.Stop()
+					delete(mapConn, iface)
+					lock.Unlock()
+					break
+				} else {
+					mapConn[iface] = list
+				}
+			}
+
+			lock.Unlock()
 		}
 	}
 }
